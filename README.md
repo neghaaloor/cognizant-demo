@@ -640,6 +640,7 @@ in your own layer.
 
 **Frontend displays. Backend decides. SQLite stores. GCP hosts.**
 
+
 ---
 
 ## SQLite Database Setup

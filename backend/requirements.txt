@@ -1,0 +1,9 @@
+# Board Game Scorekeeper - backend dependencies
+# Deliberately minimal: Flask + a production WSGI server. SQLite ships with
+# Python, so there is no database driver to install.
+
+Flask==3.0.3
+gunicorn==22.0.0
+
+# Testing only (safe to install everywhere; not imported by the app).
+pytest==8.2.2

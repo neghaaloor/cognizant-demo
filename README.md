@@ -639,3 +639,183 @@ in your own layer.
 ---
 
 **Frontend displays. Backend decides. SQLite stores. GCP hosts.**
+
+---
+
+## SQLite Database Setup
+
+The backend uses SQLite as the persistent database for the scorekeeper application.
+
+### Database Architecture
+
+The database flow is:
+
+    Flask API
+        ↓
+    Routes
+        ↓
+    Services
+        ↓
+    backend/database/database.py
+        ↓
+    SQLite
+        ↓
+    backend/data/scorekeeper.db
+
+The SQLite database is initialized automatically when the backend starts.
+
+### Database Files
+
+The database implementation is located under:
+
+    backend/
+    └── database/
+        ├── __init__.py
+        ├── database.py
+        └── schema.sql
+
+The runtime SQLite database is created at:
+
+    backend/data/scorekeeper.db
+
+### Database Schema
+
+The application uses four primary tables:
+
+- `scoreboards` — stores scoreboard/game sessions and their status.
+- `players` — stores players belonging to a scoreboard.
+- `rounds` — stores rounds belonging to a scoreboard.
+- `scores` — stores the score of each player for each round.
+
+The relationship is:
+
+    scoreboards
+        ├── players
+        └── rounds
+              └── scores
+                     └── players
+
+### Source of Truth
+
+The `scores` table is the source of truth for scoring.
+
+Player totals are not stored in the `players` table. Totals are derived from the round-by-round scores using `SUM(points)`.
+
+This prevents stored totals from becoming inconsistent with the actual score history.
+
+### Database Constraints
+
+The schema enforces:
+
+- Foreign-key relationships.
+- Unique player names within the same scoreboard.
+- Unique round numbers within the same scoreboard.
+- Only one score for a player in a particular round.
+- Cascade deletion for dependent players, rounds, and scores.
+- `winner_id` is set to `NULL` if the referenced player is deleted.
+
+### SQLite Connection Layer
+
+`backend/database/database.py` provides the common database access layer used by the services.
+
+It provides:
+
+- SQLite connection management.
+- Flask request-scoped database connections.
+- Foreign-key enforcement.
+- WAL journal mode.
+- Single-query helpers.
+- Multi-row query helpers.
+- Write/commit helpers.
+- Transaction support.
+- Database initialization.
+
+Foreign keys are explicitly enabled on every connection:
+
+    PRAGMA foreign_keys = ON
+
+WAL mode is also enabled:
+
+    PRAGMA journal_mode = WAL
+
+### Transactions
+
+Multi-step operations use database transactions to guarantee all-or-nothing writes.
+
+For example, submitting scores for a round uses a transaction so that either all valid score entries are committed or the entire operation is rolled back.
+
+### Local Setup
+
+From the `backend` directory:
+
+    python -m venv venv
+
+Activate the virtual environment on Windows:
+
+    .\venv\Scripts\Activate.ps1
+
+Install dependencies:
+
+    python -m pip install -r requirements.txt
+
+Start the backend:
+
+    python app.py
+
+The backend automatically creates/initializes:
+
+    backend/data/scorekeeper.db
+
+A successful startup prints a message similar to:
+
+    database ready at ...\backend\data\scorekeeper.db
+
+### Verifying SQLite
+
+The API can be used to verify that the application is writing to SQLite.
+
+For example:
+
+    POST /api/scoreboards
+
+A scoreboard created through the API is persisted in `scorekeeper.db`.
+
+The database can then be inspected directly using Python's built-in SQLite module:
+
+    import sqlite3
+
+    db = sqlite3.connect("./data/scorekeeper.db")
+
+    rows = db.execute(
+        "SELECT id, name, status, current_round, created_at "
+        "FROM scoreboards"
+    ).fetchall()
+
+    for row in rows:
+        print(row)
+
+    db.close()
+
+This confirms the complete flow:
+
+    API
+      ↓
+    Flask
+      ↓
+    Service layer
+      ↓
+    database.py
+      ↓
+    SQLite
+      ↓
+    scorekeeper.db
+
+### Important Development Notes
+
+Do not commit the generated SQLite database file.
+
+Do not commit the Python virtual environment.
+
+The database schema and connection layer are committed to Git; the SQLite database file is generated locally when the application starts.
+
+Services should use the existing database helpers rather than creating independent SQLite connections.

@@ -11,12 +11,14 @@ Run the way Cloud Run does:
 """
 
 import logging
+import os
 import sqlite3
 import time
 import uuid
 
-from flask import Flask, g, jsonify, request
+from flask import Flask, g, jsonify, request, send_from_directory
 
+import auth
 from config import Config
 from database import database as db
 from errors import (
@@ -34,9 +36,19 @@ from routes import (
     round_routes,
     score_routes,
     scoreboard_routes,
+    session_routes,
+    tournament_routes,
 )
 
 log = logging.getLogger("scorekeeper")
+
+
+# The built frontend, when there is one. Serving it from Flask means a single
+# port serves the whole app, which is what makes another device on the network
+# able to reach it without extra configuration.
+DIST_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dist")
+)
 
 
 def create_app(config_object=Config):
@@ -57,11 +69,13 @@ def create_app(config_object=Config):
     register_error_handlers(app)
     register_health(app)
 
+    app.register_blueprint(session_routes.bp)
     app.register_blueprint(scoreboard_routes.bp)
     app.register_blueprint(player_routes.bp)
     app.register_blueprint(round_routes.bp)
     app.register_blueprint(score_routes.bp)
     app.register_blueprint(analysis_routes.bp)
+    app.register_blueprint(tournament_routes.bp)
 
     return app
 
@@ -81,6 +95,12 @@ def register_request_hooks(app):
     def start_timer():
         g.request_id = request.headers.get("X-Request-Id", str(uuid.uuid4())[:8])
         g.started_at = time.time()
+
+    @app.before_request
+    def identify_caller():
+        # Resolve X-User-Id into an account for the life of this request.
+        # scoreboard_service reads it, so ownership cannot be bypassed.
+        auth.load_current_user()
 
     @app.before_request
     def handle_preflight():
@@ -123,10 +143,14 @@ def _apply_cors(app, response):
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Vary"] = "Origin"
 
+    # PUT matters: every score write is a PUT, so leaving it out breaks
+    # scoring the moment the frontend is on a different origin.
     response.headers["Access-Control-Allow-Methods"] = (
-        "GET, POST, PATCH, DELETE, OPTIONS"
+        "GET, POST, PUT, PATCH, DELETE, OPTIONS"
     )
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Request-Id"
+    response.headers["Access-Control-Allow-Headers"] = (
+        "Content-Type, X-Request-Id, X-User-Id"
+    )
     response.headers["Access-Control-Max-Age"] = "3600"
     return response
 
@@ -267,15 +291,45 @@ def register_health(app):
 
     @app.get("/")
     def index():
-        """Tiny landing page so a browser hit on the Cloud Run URL is useful."""
+        """Serve the app if it has been built, otherwise describe the API."""
+        if os.path.isfile(os.path.join(DIST_DIR, "index.html")):
+            return send_from_directory(DIST_DIR, "index.html")
         return jsonify(
             {
-                "service": "Board Game Scorekeeper API",
+                "service": "GameBoard API",
                 "status": "running",
                 "health": "/health",
-                "docs": "See docs/API_CONTRACT.md in the repository.",
+                "hint": "Run `npm run build` to serve the app from here too.",
+                "docs": "See docs/API_CONTRACT.md.",
             }
         )
+
+    @app.get("/<path:requested>")
+    def spa(requested):
+        """Static assets, then the SPA fallback.
+
+        /api/* and /health are registered before this catch-all, so they win.
+        Anything else that is not a real file is a client-side route and must
+        return index.html or a refresh on /history would 404.
+        """
+        if requested.startswith("api/"):
+            return jsonify(
+                {"success": False, "error": NOT_FOUND,
+                 "message": f"No route matches GET /{requested}."}
+            ), 404
+
+        candidate = os.path.join(DIST_DIR, requested)
+        if os.path.isfile(candidate):
+            return send_from_directory(DIST_DIR, requested)
+
+        index_html = os.path.join(DIST_DIR, "index.html")
+        if os.path.isfile(index_html):
+            return send_from_directory(DIST_DIR, "index.html")
+
+        return jsonify(
+            {"success": False, "error": NOT_FOUND,
+             "message": f"No route matches GET /{requested}."}
+        ), 404
 
 
 app = create_app()

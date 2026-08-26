@@ -12,9 +12,16 @@ def test_health_reports_database_connected(client):
 
 
 def test_index_is_useful_in_a_browser(client):
+    """`/` serves the built app when there is one, and describes the API when
+    there is not. GameBoard serves the frontend from Flask so a single port
+    reaches the whole thing, hence the two acceptable answers."""
     response = client.get("/")
     assert response.status_code == 200
-    assert response.get_json()["health"] == "/health"
+
+    if response.mimetype == "text/html":
+        assert b"<div id=\"root\">" in response.data
+    else:
+        assert response.get_json()["health"] == "/health"
 
 
 def test_unknown_route_returns_the_standard_error_shape(client):

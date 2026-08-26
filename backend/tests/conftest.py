@@ -34,7 +34,30 @@ def app(tmp_path):
 
 @pytest.fixture
 def client(app):
-    return app.test_client()
+    """A signed-in test client.
+
+    GameBoard added accounts: boards belong to a user and every scoreboard
+    query is filtered by owner_id. The upstream tests were written before that
+    existed, so the client signs in once and sends X-User-Id on every request.
+    They then exercise exactly the same behaviour, just inside an account.
+
+    Ownership itself is covered separately in test_accounts.py.
+    """
+    test_client = app.test_client()
+    response = test_client.post("/api/session", json={"name": "Test Owner"})
+    user_id = response.get_json()["user"]["id"]
+    test_client.environ_base["HTTP_X_USER_ID"] = str(user_id)
+    return test_client
+
+
+@pytest.fixture
+def other_client(app):
+    """A second, unrelated account — used to prove boards are not shared."""
+    test_client = app.test_client()
+    response = test_client.post("/api/session", json={"name": "Someone Else"})
+    user_id = response.get_json()["user"]["id"]
+    test_client.environ_base["HTTP_X_USER_ID"] = str(user_id)
+    return test_client
 
 
 # ---------------------------------------------------------------------------

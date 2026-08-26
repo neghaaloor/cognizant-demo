@@ -3,6 +3,9 @@
 Owner: Person 5 (data access) with the rules enforced by Person 6's validators.
 """
 
+import json
+
+import auth
 from database import database as db
 from errors import ApiError, ROUND_INCOMPLETE, scoreboard_not_found
 from services import leaderboard_service, player_service, round_service
@@ -13,11 +16,33 @@ from validators import scoreboard_validator as sv
 # Read
 # ---------------------------------------------------------------------------
 def get_scoreboard_row(scoreboard_id):
-    """Raw row, or 404. Every other service starts by calling this."""
-    row = db.query_one("SELECT * FROM scoreboards WHERE id = ?", (scoreboard_id,))
+    """Raw row, or 404. Every other service starts by calling this.
+
+    OWNERSHIP (added for GameBoard): the lookup is scoped to the signed-in
+    account. Because every service funnels through here, a board belonging to
+    someone else is unreachable through any endpoint — not merely hidden in
+    the UI.
+
+    Another account's board answers 404, not 403, so the API never confirms
+    that a board it will not show you exists.
+    """
+    owner_id = auth.require_user_id()
+    row = db.query_one(
+        "SELECT * FROM scoreboards WHERE id = ? AND owner_id = ?",
+        (scoreboard_id, owner_id),
+    )
     if row is None:
         raise scoreboard_not_found(scoreboard_id)
     return dict(row)
+
+
+def _load_json(text, fallback):
+    if not text:
+        return fallback
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError):
+        return fallback
 
 
 def serialize(row, players=None):
@@ -31,6 +56,14 @@ def serialize(row, players=None):
         "createdAt": row["created_at"],
         "startedAt": row["started_at"],
         "endedAt": row["ended_at"],
+        # Added for GameBoard: which of the six board types renders this, plus
+        # the state the relational model does not cover (bracket tree, clock).
+        "ownerId": row["owner_id"] if "owner_id" in row.keys() else None,
+        "boardId": (row["board_id"] if "board_id" in row.keys() else None) or "scoresheet",
+        "boardName": row["board_name"] if "board_name" in row.keys() else None,
+        "config": _load_json(row["config"] if "config" in row.keys() else None, {}),
+        "boardState": _load_json(row["board_state"] if "board_state" in row.keys() else None, None),
+        "tournamentId": row["tournament_id"] if "tournament_id" in row.keys() else None,
     }
     if players is not None:
         payload["players"] = players
@@ -46,25 +79,109 @@ def get_scoreboard(scoreboard_id):
 
 
 def list_scoreboards(limit=50):
-    """Convenience listing. Handy for the team while testing with curl."""
+    """Every board owned by the signed-in account, newest first.
+
+    This is the history screen. It is filtered by owner_id in SQL rather than
+    in the client, which is what stops one person's games showing up in
+    another person's history.
+    """
+    owner_id = auth.require_user_id()
+    return list_scoreboards_for_owner(owner_id, limit)
+
+
+def list_scoreboards_for_owner(owner_id, limit=100):
+    """Boards owned by this account, each carrying its final standings.
+
+    The history screen needs totals and a winner. Sending the ranked
+    leaderboard with the list means it does not have to re-total anything in
+    JS — and it is why finished games used to show every player on zero.
+    """
     rows = db.query_all(
-        "SELECT * FROM scoreboards ORDER BY created_at DESC, id DESC LIMIT ?",
-        (limit,),
+        """SELECT * FROM scoreboards
+            WHERE owner_id = ?
+         ORDER BY created_at DESC, id DESC
+            LIMIT ?""",
+        (owner_id, limit),
     )
-    return [serialize(dict(row)) for row in rows]
+
+    boards = []
+    for row in rows:
+        row = dict(row)
+        board = serialize(row, player_service.list_players(row["id"]))
+
+        leaderboard = leaderboard_service.get_leaderboard(row["id"])
+        board["leaderboard"] = leaderboard
+        board["roundsPlayed"] = round_service.count_rounds(row["id"])
+        board["totalPoints"] = sum(entry["score"] for entry in leaderboard)
+
+        # Only a finished board has a winner, and a draw has none — the
+        # scoreboard refuses to invent a tie-breaker it cannot know.
+        board["winner"] = None
+        board["tie"] = False
+        if row["status"] == "ENDED":
+            result = leaderboard_service.determine_winner(leaderboard)
+            board["tie"] = result["tie"]
+            board["tiedPlayers"] = result["tiedPlayers"]
+            board["winner"] = result["winner"]["name"] if result["winner"] else None
+
+        boards.append(board)
+
+    return boards
 
 
 # ---------------------------------------------------------------------------
 # Write
 # ---------------------------------------------------------------------------
-def create_scoreboard(name):
-    """A new session always begins in SETUP with round 0 and no players."""
+def create_scoreboard(name, board_id="scoresheet", board_name=None, config=None,
+                      board_state=None):
+    """A new session always begins in SETUP with round 0 and no players.
+
+    The board is stamped with the signed-in account, which is what makes it
+    private to them from this moment on.
+    """
+    owner_id = auth.require_user_id()
     clean_name = sv.validate_name(name)
     cursor = db.execute(
-        "INSERT INTO scoreboards (name, status, current_round) VALUES (?, 'SETUP', 0)",
-        (clean_name,),
+        """INSERT INTO scoreboards
+               (name, status, current_round, owner_id, board_id, board_name,
+                config, board_state)
+           VALUES (?, 'SETUP', 0, ?, ?, ?, ?, ?)""",
+        (
+            clean_name,
+            owner_id,
+            board_id or "scoresheet",
+            board_name,
+            json.dumps(config or {}),
+            json.dumps(board_state) if board_state is not None else None,
+        ),
     )
     return get_scoreboard(cursor.lastrowid)
+
+
+def update_board_meta(scoreboard_id, name=None, config=None, board_state=None):
+    """Rename a board, or store display-only state (bracket tree, game clock).
+
+    Points are never written here — they always live in `scores`, so a total
+    can never drift away from the round-by-round history.
+    """
+    get_scoreboard_row(scoreboard_id)  # 404 + ownership check
+
+    sets, params = [], []
+    if name is not None:
+        sets.append("name = ?")
+        params.append(sv.validate_name(name))
+    if config is not None:
+        sets.append("config = ?")
+        params.append(json.dumps(config))
+    if board_state is not None:
+        sets.append("board_state = ?")
+        params.append(json.dumps(board_state))
+
+    if sets:
+        params.append(scoreboard_id)
+        db.execute(f"UPDATE scoreboards SET {', '.join(sets)} WHERE id = ?", params)
+
+    return get_scoreboard(scoreboard_id)
 
 
 def start_scoreboard(scoreboard_id):

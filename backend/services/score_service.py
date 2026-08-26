@@ -113,3 +113,81 @@ def get_scores(scoreboard_id):
         }
         for row in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# ADDED for GameBoard: set / adjust one player's score in a round.
+#
+# The upstream contract only submits a round once, which fits a scoresheet
+# perfectly. The running-total boards (Leaderboard, Scoreboard, Counter,
+# Sports) need to correct a number or nudge it by a delta, over and over,
+# which POST /scores rejects as DUPLICATE_SCORE by design.
+#
+# These write to the same `scores` table, so totals are still SUM() over the
+# round-by-round history — nothing is cached and nothing can drift.
+# ---------------------------------------------------------------------------
+def set_score(scoreboard_id, round_id, player_id, points, mode="SET"):
+    """Write a player's score for one round.
+
+    mode SET    -> points becomes the value
+    mode ADJUST -> points is added to whatever is already there
+    """
+    scoreboard = scoreboard_service.get_scoreboard_row(scoreboard_id)
+    sv.require_status(scoreboard, sv.ACTIVE, "change a score")
+
+    round_row = round_service.get_round_row(round_id)
+    sc.require_round_in_scoreboard(round_row, scoreboard_id)
+
+    players = player_service.list_players(scoreboard_id)
+    sc.require_players_in_scoreboard([player_id], players)
+
+    value = sc.validate_points(points)
+
+    mode = (mode or "SET").upper()
+    if mode not in ("SET", "ADJUST"):
+        raise ApiError(
+            "INVALID_REQUEST",
+            "mode must be either 'SET' or 'ADJUST'.",
+            400,
+        )
+
+    # One atomic UPSERT rather than SELECT-then-INSERT/UPDATE.
+    #
+    # Read-then-write raced: two writes to the same cell (a blur and an Enter,
+    # or two quick +1 taps) both saw "no row yet", both INSERTed, and the second
+    # hit UNIQUE(round_id, player_id) as a 500. Letting SQLite resolve the
+    # conflict makes it race-free, and ADJUST becomes a real atomic increment,
+    # so rapid taps can no longer lose an update either.
+    if mode == "ADJUST":
+        upsert = """
+            INSERT INTO scores (round_id, player_id, points) VALUES (?, ?, ?)
+            ON CONFLICT (round_id, player_id)
+            DO UPDATE SET points = scores.points + excluded.points
+        """
+    else:
+        upsert = """
+            INSERT INTO scores (round_id, player_id, points) VALUES (?, ?, ?)
+            ON CONFLICT (round_id, player_id)
+            DO UPDATE SET points = excluded.points
+        """
+
+    with db.transaction() as connection:
+        connection.execute(upsert, (round_id, player_id, value))
+        row = connection.execute(
+            "SELECT points FROM scores WHERE round_id = ? AND player_id = ?",
+            (round_id, player_id),
+        ).fetchone()
+        value = row["points"]
+        # Range-check the settled total. Raising in here rolls the write back.
+        sc.validate_points(value, player_id)
+
+    round_state = round_service.get_round_detail(scoreboard_id, round_id)
+    return {
+        "roundId": round_id,
+        "roundNumber": round_row["round_number"],
+        "playerId": player_id,
+        "points": value,
+        "roundComplete": round_state["complete"],
+        "missingPlayers": round_state["missingPlayers"],
+        "leaderboard": leaderboard_service.get_leaderboard(scoreboard_id),
+    }

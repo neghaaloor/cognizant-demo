@@ -11,6 +11,15 @@
 #       --max-instances 1          # <-- see the note on SQLite below
 # ============================================================================
 
+FROM node:20-slim AS frontend
+
+WORKDIR /frontend
+COPY package*.json ./
+RUN npm ci
+COPY index.html postcss.config.js tailwind.config.js vite.config.js ./
+COPY src/ ./src/
+RUN npm run build
+
 FROM python:3.11-slim
 
 # Faster, quieter, no .pyc clutter in the image.
@@ -24,9 +33,8 @@ WORKDIR /app
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Only the backend goes in the image. The frontend is static and is served
-# separately (or from a bucket) - it does not belong in the API container.
 COPY backend/ /app/
+COPY --from=frontend /frontend/dist /app/dist
 
 # ---------------------------------------------------------------------------
 # SQLite on Cloud Run

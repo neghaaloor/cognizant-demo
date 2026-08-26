@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Frontend build
+node_modules/
+dist/
+
+# SQLite - the database is generated, never committed.
+# Committing it would mean every teammate's test data lands in git.
+backend/data/
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+
+# GCP credentials - NEVER commit a service account key.
+*.json.key
+service-account*.json
+gcp-key*.json
+.gcloudignore
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp

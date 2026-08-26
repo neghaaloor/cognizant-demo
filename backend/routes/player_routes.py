@@ -31,7 +31,8 @@ def list_players(scoreboard_id):
 def add_player(scoreboard_id):
     """No fixed cap during setup - keep adding until START is pressed."""
     scoreboard = scoreboard_service.get_scoreboard_row(scoreboard_id)
-    player = player_service.add_player(scoreboard, _json_body().get("name"))
+    body = _json_body()
+    player = player_service.add_player(scoreboard, body.get("name"), body.get("colour"))
     return success({"player": player}, 201)
 
 

@@ -51,6 +51,34 @@ def close_db(exception=None):
         db.close()
 
 
+# Columns added to an existing table, as (table, column, definition).
+# CREATE TABLE IF NOT EXISTS does nothing to a table that already exists, so a
+# database created before one of these shipped would be missing the column.
+_ADDED_COLUMNS = [
+    ("scoreboards", "owner_id", "INTEGER"),
+    ("scoreboards", "board_id", "TEXT NOT NULL DEFAULT 'scoresheet'"),
+    ("scoreboards", "board_name", "TEXT"),
+    ("scoreboards", "config", "TEXT NOT NULL DEFAULT '{}'"),
+    ("scoreboards", "board_state", "TEXT"),
+    ("scoreboards", "tournament_id", "INTEGER"),
+    ("players", "colour", "TEXT"),
+]
+
+
+def _migrate(connection):
+    for table, column, definition in _ADDED_COLUMNS:
+        existing = {
+            row["name"]
+            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if not existing:
+            continue  # table not created yet; the schema script will handle it
+        if column not in existing:
+            connection.execute(
+                f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+            )
+
+
 def init_db(app):
     """Create the tables if they do not exist. Safe to run on every boot."""
     with open(SCHEMA_FILE, "r", encoding="utf-8") as handle:
@@ -59,6 +87,7 @@ def init_db(app):
     connection = _connect(app.config["DATABASE_PATH"], app.config["DATABASE_TIMEOUT"])
     try:
         connection.executescript(schema_sql)
+        _migrate(connection)
         connection.commit()
     finally:
         connection.close()

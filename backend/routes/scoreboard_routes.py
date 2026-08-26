@@ -29,9 +29,40 @@ def _json_body():
 @bp.post("")
 @bp.post("/")
 def create_scoreboard():
+    """Create a board owned by the signed-in account.
+
+    `boardId` chooses which of the six board types renders it. The scoreboard
+    itself stays game-agnostic — it only ever stores who scored what.
+    """
     body = _json_body()
-    scoreboard = scoreboard_service.create_scoreboard(body.get("name"))
+    scoreboard = scoreboard_service.create_scoreboard(
+        body.get("name"),
+        board_id=body.get("boardId"),
+        board_name=body.get("boardName"),
+        config=body.get("config"),
+        board_state=body.get("boardState"),
+    )
     return success({"scoreboard": scoreboard}, 201)
+
+
+@bp.patch("/<int:scoreboard_id>")
+def update_scoreboard(scoreboard_id):
+    """Rename, or save display-only state (bracket tree, game clock).
+
+    Points are never accepted here — they go through /scores so that totals
+    stay derived from the round-by-round history.
+    """
+    body = _json_body()
+    return success(
+        {
+            "scoreboard": scoreboard_service.update_board_meta(
+                scoreboard_id,
+                name=body.get("name"),
+                config=body.get("config"),
+                board_state=body.get("boardState"),
+            )
+        }
+    )
 
 
 @bp.get("")

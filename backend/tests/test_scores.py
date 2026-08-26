@@ -209,3 +209,97 @@ def test_missing_scores_key_is_rejected(client, api):
     )
     assert response.status_code == 400
     assert response.get_json()["error"] == "INVALID_REQUEST"
+
+
+# ---------------------------------------------------------------------------
+# set_score (GameBoard addition) — the running-total boards write here
+# ---------------------------------------------------------------------------
+def test_set_score_writes_and_overwrites(client, api):
+    board_id, players = api.setup_game(["Ana", "Ben"])
+    round_id = api.current_round_id(board_id)
+    ana = players["Ana"]
+
+    first = client.put(
+        f"/api/scoreboards/{board_id}/rounds/{round_id}/scores/{ana}",
+        json={"points": 25},
+    )
+    assert first.status_code == 200
+    assert first.get_json()["points"] == 25
+
+    # Writing the same cell again must overwrite, not raise a duplicate error.
+    again = client.put(
+        f"/api/scoreboards/{board_id}/rounds/{round_id}/scores/{ana}",
+        json={"points": 40},
+    )
+    assert again.status_code == 200
+    assert again.get_json()["points"] == 40
+
+
+def test_repeated_writes_to_one_cell_never_conflict(client, api):
+    """Regression: a blur and an Enter both firing used to race into a 500.
+
+    Read-then-insert let two writes both decide the row did not exist yet, and
+    the second violated UNIQUE(round_id, player_id).
+    """
+    board_id, players = api.setup_game(["Ana", "Ben"])
+    round_id = api.current_round_id(board_id)
+    ana = players["Ana"]
+
+    for points in (5, 5, 12, 12, 0, 7):
+        response = client.put(
+            f"/api/scoreboards/{board_id}/rounds/{round_id}/scores/{ana}",
+            json={"points": points},
+        )
+        assert response.status_code == 200, response.get_json()
+
+    board = client.get(f"/api/scoreboards/{board_id}/leaderboard").get_json()
+    ana_row = next(r for r in board["leaderboard"] if r["playerId"] == ana)
+    assert ana_row["score"] == 7
+
+
+def test_adjust_accumulates_atomically(client, api):
+    """ADJUST is an increment in SQL, so rapid taps cannot lose an update."""
+    board_id, players = api.setup_game(["Ana", "Ben"])
+    round_id = api.current_round_id(board_id)
+    ana = players["Ana"]
+
+    for _ in range(10):
+        response = client.put(
+            f"/api/scoreboards/{board_id}/rounds/{round_id}/scores/{ana}",
+            json={"points": 3, "mode": "ADJUST"},
+        )
+        assert response.status_code == 200
+
+    assert response.get_json()["points"] == 30
+
+    # ...and downward.
+    client.put(
+        f"/api/scoreboards/{board_id}/rounds/{round_id}/scores/{ana}",
+        json={"points": -12, "mode": "ADJUST"},
+    )
+    board = client.get(f"/api/scoreboards/{board_id}/leaderboard").get_json()
+    ana_row = next(r for r in board["leaderboard"] if r["playerId"] == ana)
+    assert ana_row["score"] == 18
+
+
+def test_set_score_rejects_a_bad_mode(client, api):
+    board_id, players = api.setup_game(["Ana", "Ben"])
+    round_id = api.current_round_id(board_id)
+    response = client.put(
+        f"/api/scoreboards/{board_id}/rounds/{round_id}/scores/{players['Ana']}",
+        json={"points": 5, "mode": "MULTIPLY"},
+    )
+    assert response.status_code == 400
+
+
+def test_set_score_rejects_a_foreign_player(client, api):
+    board_id, _ = api.setup_game(["Ana", "Ben"])
+    other_id, other_players = api.setup_game(["Zoe"])
+    round_id = api.current_round_id(board_id)
+
+    response = client.put(
+        f"/api/scoreboards/{board_id}/rounds/{round_id}/scores/{other_players['Zoe']}",
+        json={"points": 5},
+    )
+    assert response.status_code == 404
+    assert response.get_json()["error"] == "PLAYER_NOT_FOUND"

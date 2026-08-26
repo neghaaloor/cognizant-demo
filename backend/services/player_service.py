@@ -15,6 +15,8 @@ def serialize(row):
         "id": row["id"],
         "scoreboardId": row["scoreboard_id"],
         "name": row["name"],
+        # Added for GameBoard: the UI gives every player a colour.
+        "colour": row["colour"] if "colour" in row.keys() else None,
         "joinedAt": row["joined_at"],
     }
 
@@ -38,7 +40,7 @@ def get_player(scoreboard_id, player_id):
     return serialize(row)
 
 
-def add_player(scoreboard, name):
+def add_player(scoreboard, name, colour=None):
     """Add one player. SETUP only - the roster locks when the game starts.
 
     `scoreboard` is the row dict from scoreboard_service.get_scoreboard_row,
@@ -53,8 +55,8 @@ def add_player(scoreboard, name):
 
     try:
         cursor = db.execute(
-            "INSERT INTO players (scoreboard_id, name) VALUES (?, ?)",
-            (scoreboard["id"], clean_name),
+            "INSERT INTO players (scoreboard_id, name, colour) VALUES (?, ?, ?)",
+            (scoreboard["id"], clean_name, colour),
         )
     except sqlite3.IntegrityError:
         # The UNIQUE(scoreboard_id, name) constraint fired - two requests

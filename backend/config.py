@@ -35,7 +35,9 @@ class Config:
     # Server
     # ------------------------------------------------------------------
     # Cloud Run injects PORT. Never hard-code 8080 anywhere else.
-    PORT = int(os.environ.get("PORT", "8080"))
+    # 8080 is a popular default and was already taken on the dev machine, so
+    # GameBoard defaults to 5055. Cloud Run injects PORT and still wins.
+    PORT = int(os.environ.get("PORT", "5055"))
     HOST = os.environ.get("HOST", "0.0.0.0")
     DEBUG = _as_bool(os.environ.get("FLASK_DEBUG"), False)
 

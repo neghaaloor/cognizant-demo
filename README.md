@@ -99,50 +99,34 @@ leaderboard → history → analysis → end → winner → reset):
 
 ```
 GameBoard/
-├── backend/                    Flask API, services, SQLite schema, and tests
-│   ├── app.py                    Flask entry point, /health, error handlers, CORS
-│   ├── config.py                 All env-driven settings
-│   ├── errors.py                 Error code catalogue + response shape
-│   ├── logging_config.py         JSON logs for GCP Cloud Logging
+├── backend/
+│   ├── app.py, auth.py, config.py, errors.py, logging_config.py
+│   ├── database/                 SQLite connection and schema
+│   ├── routes/                   Flask blueprints for all API resources
+│   ├── services/                 Business logic and data access
+│   ├── validators/               Request validation rules
+│   ├── tests/                    95 backend tests
 │   ├── requirements.txt
-│   ├── database/               ← Person 8 owns this
-│   │   ├── schema.sql            The 4 tables
-│   │   └── database.py           Connections, transactions, ping()
-│   ├── routes/                 ← Person 5: HTTP layer only
-│   │   ├── scoreboard_routes.py
-│   │   ├── player_routes.py
-│   │   ├── round_routes.py
-│   │   ├── score_routes.py
-│   │   └── analysis_routes.py
-│   ├── services/               ← Person 5: business logic + SQL
-│   │   ├── scoreboard_service.py
-│   │   ├── player_service.py
-│   │   ├── round_service.py
-│   │   ├── score_service.py
-│   │   ├── leaderboard_service.py
-│   │   └── analysis_service.py
-│   ├── validators/             ← Person 6: "is this allowed? is this valid?"
-│   │   ├── scoreboard_validator.py
-│   │   ├── player_validator.py
-│   │   └── score_validator.py
-│   └── tests/                    95 tests
-├── src/                          React pages, boards, voice controls, and API client
+│   └── pytest.ini
+├── src/
+│   ├── pages/                    Login, dashboard, games, history, analysis, tournaments
+│   ├── boards/                   Six board display types and bracket engine
+│   ├── components/               Shared UI, leaderboard, sidebar, and voice controls
+│   ├── engines/                  Scoring and leaderboard calculations
+│   ├── services/                 API, storage, speech, commentary, and voice commands
+│   └── App.jsx, main.jsx, index.css
+├── index.html                    Vite entry point
 ├── package.json                  Frontend scripts and dependencies
-├── vite.config.js                Frontend development proxy
-├── docs/
-│   ├── API_CONTRACT.md           Full request/response reference
-│   ├── DEPLOYMENT.md             Person 7's GCP runbook
-│   └── TROUBLESHOOTING.md        Layer-by-layer debugging
-├── scripts/smoke_test.sh         End-to-end check against a running server
-├── Dockerfile                    Cloud Run image
+├── vite.config.js                Vite development proxy
+├── tailwind.config.js
+├── docs/                         API, deployment, and troubleshooting guides
+├── scripts/smoke_test.sh         Authenticated end-to-end API check
+├── Dockerfile                    Multi-stage frontend + Flask Cloud Run image
 └── .env.example
 ```
 
-**Where to add code, by folder:**
-
-- New endpoint → `routes/` (thin) + `services/` (logic). Never put SQL in a route.
-- New rule ("players can't do X") → `validators/`. Never inline a rule in a service.
-- New table or query → `database/`.
+Routes stay thin; business logic belongs in `services/`, validation belongs in
+`validators/`, and schema/connection changes belong in `database/`.
 
 ---
 
@@ -153,7 +137,11 @@ Base URL: `http://localhost:5055` locally, or your Cloud Run URL.
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | Server + database health |
+| `POST` | `/api/session` | Sign in or create an account by name |
+| `GET` | `/api/session` | Validate the current account |
+| `GET` | `/api/session/boards` | List boards owned by the current account |
 | `POST` | `/api/scoreboards` | Create a scoreboard (status `SETUP`) |
+| `GET` | `/api/scoreboards` | List the current account's scoreboards |
 | `GET` | `/api/scoreboards/{id}` | Scoreboard + its players |
 | `GET` | `/api/scoreboards/{id}/players` | List players |
 | `POST` | `/api/scoreboards/{id}/players` | Add a player *(SETUP only)* |
@@ -164,6 +152,8 @@ Base URL: `http://localhost:5055` locally, or your Cloud Run URL.
 | `GET` | `/api/scoreboards/{id}/rounds/current` | The round being played now |
 | `POST` | `/api/scoreboards/{id}/rounds` | Open the next round |
 | `POST` | `/api/scoreboards/{id}/rounds/{rid}/scores` | **Submit a round** |
+| `PUT` | `/api/scoreboards/{id}/rounds/{rid}/scores/{pid}` | Update one player's score |
+| `GET` | `/api/scoreboards/{id}/scores` | List scores for a scoreboard |
 | `GET` | `/api/scoreboards/{id}/leaderboard` | Ranked standings |
 | `GET` | `/api/scoreboards/{id}/history` | R1/R2/R3/TOTAL grid |
 | `GET` | `/api/scoreboards/{id}/analysis` | Stats + achievements + timeline |
@@ -172,6 +162,15 @@ Base URL: `http://localhost:5055` locally, or your Cloud Run URL.
 | `GET` | `/api/scoreboards/{id}/timeline` | Narrative only |
 | `POST` | `/api/scoreboards/{id}/end` | `ACTIVE → ENDED`, decides the winner |
 | `POST` | `/api/scoreboards/{id}/reset` | Clear scores, keep players |
+| `GET` | `/api/tournaments` | List the current account's tournaments |
+| `POST` | `/api/tournaments` | Create a tournament |
+| `GET` | `/api/tournaments/{id}` | Read a tournament |
+| `PATCH` | `/api/tournaments/{id}` | Update a tournament |
+| `POST` | `/api/tournaments/{id}/games` | Create a game in a tournament |
+| `DELETE` | `/api/tournaments/{id}` | Delete a tournament |
+
+Protected endpoints require the `X-User-Id` header returned by
+`POST /api/session`. The frontend manages this automatically after sign-in.
 
 **Every success looks like this:**
 
@@ -198,31 +197,14 @@ Full reference with every field: **[docs/API_CONTRACT.md](docs/API_CONTRACT.md)*
 
 ## 5. How the application works
 
-### The one file every frontend person needs
+### Frontend API client
 
-Create `frontend/js/api.js` and put **the base URL in exactly one place**, so
-switching from localhost to Cloud Run is a one-line change:
+API requests are centralized in [`src/services/api.js`](src/services/api.js).
+The client discovers the backend on startup; set `VITE_API_BASE` when a custom
+API URL is required.
 
-```js
-// frontend/js/api.js
-const API_BASE = "http://localhost:5055";   // change to your Cloud Run URL
-
-async function api(path, method = "GET", body = null) {
-  const response = await fetch(API_BASE + path, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: body ? JSON.stringify(body) : null,
-  });
-
-  const data = await response.json();
-
-  if (!data.success) {
-    // data.error is the stable code, e.g. "DUPLICATE_PLAYER"
-    throw Object.assign(new Error(data.message), { code: data.error });
-  }
-  return data;
-}
-```
+The API client also persists the signed-in account and adds its
+`X-User-Id` header to protected requests.
 
 Then every call is one line:
 
@@ -244,7 +226,7 @@ try {
 
 ---
 
-### Person 1 — Setup / Lobby / QR / Game PIN
+### Game setup and lobby
 
 **Your flow:**
 
@@ -278,12 +260,12 @@ await api(`/api/scoreboards/${scoreboardId}/start`);   // → status ACTIVE, Rou
 - **QR / Game PIN:** the backend has no PIN column today. The simplest approach
   that needs no backend change is to encode the **scoreboard id** in the QR/share
   URL — `https://your-frontend/join?scoreboard=12`. If the team decides it wants
-  a short 6-digit PIN instead of the raw id, tell Person 5/6 and it is a small
-  addition to the `scoreboards` table.
+  a short 6-digit PIN instead of the raw id, add it to the `scoreboards` table
+  and expose it through the scoreboard routes and frontend API client.
 
 ---
 
-### Person 2 — Scoreboard / History / Winner / Animations
+### Scoring and game lifecycle
 
 **Your flow:**
 
@@ -347,14 +329,13 @@ const { history } = await api(`/api/scoreboards/${id}/history`);
 
 ### Voice control (Web Speech)
 
-**Do not start until `/health` is green on Cloud Run and the frontend works
-without voice.** Voice is an input/output layer, not a second scoring system.
+Voice is an input/output layer, not a second scoring system.
 
 ```
 Speech → Web Speech STT → your command parser → the SAME api() calls above → TTS
 ```
 
-**Command → API mapping (use the exact endpoints Persons 1 and 2 already call):**
+**Command → API mapping:**
 
 | Spoken | Call |
 |---|---|
@@ -390,7 +371,7 @@ window.webkitSpeechRecognition` and hide the mic button if absent.
 
 ---
 
-### Person 4 — Score Analysis / Achievements / Timeline
+### Score analysis, achievements, and timeline
 
 **The backend already computes all of this.** One call gets everything:
 
@@ -434,13 +415,13 @@ Types: `LEAD_TAKEN`, `LEAD_CHANGE`, `LEAD_EXTENDED`, `GAP_CLOSED`, `LEAD_HELD`, 
 
 **Why all achievements are points-only:** the scoreboard does not know the game.
 It can say "Highest Scoring Round"; it can never say "Captured 5 territories".
-If you want a new badge, it must be derivable from points alone — ask Person 5
-to add it to `services/analysis_service.py` rather than computing it in JS, so
-every screen agrees.
+If you want a new badge, it must be derivable from points alone. Add it to
+`backend/services/analysis_service.py` rather than computing it in JS, so every
+screen agrees.
 
 ---
 
-### Person 7 — GCP Cloud Run / IAM / Integration
+### GCP Cloud Run deployment
 
 Full runbook: **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**. The short version:
 
@@ -479,7 +460,7 @@ resource.type="cloud_run_revision" severity>=WARNING
 
 ---
 
-### Person 8 — SQLite Database
+### SQLite database
 
 You own `backend/database/`. The schema is live in
 [`schema.sql`](backend/database/schema.sql) and tables are created automatically
@@ -548,7 +529,8 @@ game breaks ties by cards held or a coin flip, so it does not guess.
 
 ## 7. Database schema
 
-Four tables. `scores` is the source of truth; everything else is derived.
+Six tables. `scores` is the source of truth for points; standings and analysis
+are derived.
 
 ```
 scoreboards ──┬── players ──┐
@@ -559,6 +541,8 @@ scoreboards ──┬── players ──┐
 | Table | Key columns | Notes |
 |---|---|---|
 | `scoreboards` | `id`, `name`, `status`, `current_round`, `winner_id` | One scorekeeping session |
+| `users` | `id`, `name` | Account that owns boards and tournaments |
+| `tournaments` | `id`, `owner_id`, `name`, `players`, `status` | Series of scoreboard games |
 | `players` | `id`, `scoreboard_id`, `name` | `UNIQUE(scoreboard_id, name)` |
 | `rounds` | `id`, `scoreboard_id`, `round_number` | `UNIQUE(scoreboard_id, round_number)` |
 | `scores` | `id`, `round_id`, `player_id`, `points` | `UNIQUE(round_id, player_id)` |
@@ -598,55 +582,39 @@ Frontend → HTTP request → Cloud Run → Flask → SQL → SQLite
 | `curl` works, browser doesn't | CORS or a wrong `API_BASE` |
 
 Every response carries an `X-Request-Id` header that matches the `request_id`
-field in the logs — paste it to Person 7 and they can find your exact request.
-
-**Who to ask:** Cloud Run/deploy → Person 7 · backend exception → Person 5/6 ·
-SQL/schema → Person 8 · request shape → Person 1/2.
+field in the logs, which makes individual requests easy to trace.
 
 ---
 
-## 9. Team workflow
+## 9. Development workflow
 
-**Branches** — never push straight to `main`:
-
-```
-main            ← protected, always deployable
-└── develop     ← integration
-    ├── feature/ui-lobby         (Person 1)
-    ├── feature/ui-scoreboard    (Person 2)
-    ├── feature/voice            (Person 3)
-    ├── feature/analytics        (Person 4)
-    ├── feature/game-api         (Person 5)
-    ├── feature/validation       (Person 6)
-    ├── feature/gcp              (Person 7)
-    └── feature/database         (Person 8)
-```
+Run the checks from the repository root:
 
 ```bash
-git checkout develop && git pull
-git checkout -b feature/your-part
-# ...work...
-git push -u origin feature/your-part      # then open a Pull Request
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r backend/requirements.txt
+npm install
+cd backend && python -m pytest
+cd .. && npm run build
+./scripts/smoke_test.sh
 ```
 
-**Before every PR that touches `backend/`:**
+For development with automatic reload, use `npm run dev`. This starts the API
+on port `5055` and Vite on port `5173`. For a single production-like process,
+use `npm run serve` and open `http://localhost:5055`.
+
+The Docker image builds the frontend and serves it through Flask. Cloud Run
+injects `PORT`; local Docker testing can use:
 
 ```bash
-cd backend && python -m pytest      # 95 tests must stay green
+docker build -t cognizant-demo-local .
+docker run --rm -p 8080:8080 -e PORT=8080 cognizant-demo-local
 ```
 
-**Build order:**
-
-| Phase | Who | Gate |
-|---|---|---|
-| 1 | Backend + SQLite | `pytest` + `smoke_test.sh` pass |
-| 2 | React frontend | Production build and browser flow pass |
-| 3 | Cloud Run deployment | `/health` green on the Cloud Run URL |
-
-**The rule that keeps an 8-person project from falling apart:** the API contract
-in [docs/API_CONTRACT.md](docs/API_CONTRACT.md) is fixed. If you need it changed,
-raise it with Persons 5 and 6 and change it there first — never work around it
-in your own layer.
+See [docs/API_CONTRACT.md](docs/API_CONTRACT.md) for request and response
+details, [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for Cloud Run, and
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for diagnostics.
 
 ---
 
